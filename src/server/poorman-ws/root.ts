@@ -5,19 +5,43 @@ import HTTP_STATUS from "http-status-codes";
 
 import * as v from "valibot";
 import { isNativeError } from "util/types";
+import { setKvEntry } from "../kv/setters";
 
 const actions = {
-  page_visit: async (_args: unknown) => {
-    const visits = await kv.get("visits");
+  page_visit: async ({
+    headers,
+  }: {
+    message?: string;
+    headers: NextRequest["headers"];
+  }) => {
+    const ip = headers.get("x-forwarded-for")?.split(",")[0] ?? "unknown";
 
-    if (visits === null) {
-      await kv.set("visits", 1);
-    } else {
-      const int = parseInt(visits as string);
-      await kv.set("visits", int + 1);
+    if (ip === "unknown") {
+      return "ip unknown";
     }
+
+    const visitIps = (await kv.get("visit_ips")) as string | undefined;
+    const visitIpsArray = visitIps
+      ? `${visitIps}`.split(",")
+      : ([] as Array<string>);
+    const hasVisited = Array.isArray(visitIps) ? visitIps.includes(ip) : false;
+
+    if (!hasVisited) {
+      visitIpsArray.push(ip);
+      await setKvEntry("visit_ips", ip, "append");
+    } else {
+      return "already visited";
+    }
+
+    const visits = await kv.get("visits");
+    const visitCount = isNaN(Number(visits)) ? 1 : Number(visits);
+
+    return await setKvEntry("visits", `${visitCount}`, "increment");
   },
-  ping_pong: async (_args: unknown) => {
+  ping_pong: async (_args: {
+    message?: string;
+    headers: NextRequest["headers"];
+  }) => {
     return "pong";
   },
 };
@@ -34,15 +58,15 @@ const getActionsVType = () => {
 };
 
 const MessageContext = v.object({
-  messageContext: v.object({
-    action: v.optional(v.pipe(v.string(), getActionsVType())),
-    message: v.optional(v.string()),
-  }),
+  action: v.optional(v.pipe(v.string(), getActionsVType())),
+  message: v.optional(v.string()),
 });
 type MessageContext = v.InferOutput<typeof MessageContext>;
 
 export const poormansWsHandler = async (req: NextRequest) => {
-  const { messageContext } = (await req.json()) as MessageContext;
+  const { messageContext } = (await req.json()) as {
+    messageContext: MessageContext;
+  };
 
   const contextValidity = v.safeParse(MessageContext, messageContext);
 
@@ -74,7 +98,10 @@ export const poormansWsHandler = async (req: NextRequest) => {
     );
   }
 
-  const result = await actionHandler(message);
+  const result = await actionHandler({
+    message,
+    headers: req.headers,
+  });
   const isNothingOrVoid = result === undefined || result === null;
   const returnResult = isNothingOrVoid ? "ok" : result;
 
